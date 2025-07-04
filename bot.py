@@ -1,102 +1,191 @@
-import json
 import os
-from aiogram import Bot, Dispatcher, executor, types
+import json
+import logging
+import asyncio
+import signal
+from aiogram import Bot, Dispatcher, types
+from aiogram import F
+from aiogram.enums import ParseMode
+from aiogram.types import (
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton
+)
 
-# === Конфигурация ===
-TOKEN = os.getenv("8018604636:AAEmP81mU4rYjhLel6_Q7jVYcpIfNUMcBHQ")
-OWNER_ID = 7807571960  # Ты – владелец
+# Конфигурация
+TOKEN = os.getenv("8018604636:AAEmP81mU4rYjhLel6_Q7jVYcpIfNUMcBHQ")  # Токен из Secrets GitHub
+ADMIN_ID = int(os.getenv("7807571960", 0))  # ID админа из Secrets
+
+# Логирование
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# Инициализация бота
+bot = Bot(token=TOKEN, parse_mode=ParseMode.HTML)
+dp = Dispatcher()
+
+# База данных
 DB_FILE = "users.json"
 
-bot = Bot(token=TOKEN)
-dp = Dispatcher(bot)
-
-# === Инициализация базы ===
-if not os.path.exists(DB_FILE):
-    with open(DB_FILE, "w") as f:
-        json.dump({}, f)
+def init_db():
+    if not os.path.exists(DB_FILE):
+        with open(DB_FILE, "w") as f:
+            json.dump({}, f)
 
 def load_users():
-    with open(DB_FILE, "r") as f:
-        return json.load(f)
+    try:
+        with open(DB_FILE, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, FileNotFoundError):
+        return {}
 
 def save_users(users):
     with open(DB_FILE, "w") as f:
-        json.dump(users, f, indent=4)
+        json.dump(users, f, indent=2)
 
-# === Главное меню ===
-@dp.message_handler(commands=["start"])
-async def start_cmd(msg: types.Message):
-    user_id = str(msg.from_user.id)
+init_db()
+
+# Клавиатуры
+main_kb = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="➕ Создать анкету")],
+        [KeyboardButton(text="🔍 Смотреть анкеты")],
+        [KeyboardButton(text="ℹ️ Помощь")]
+    ],
+    resize_keyboard=True
+)
+
+like_skip_kb = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [
+            InlineKeyboardButton(text="❤️ Лайк", callback_data="like"),
+            InlineKeyboardButton(text="⏭ Пропустить", callback_data="skip")
+        ]
+    ]
+)
+
+# Обработчики
+@dp.message(F.text == "/start")
+async def start(message: types.Message):
+    user_id = str(message.from_user.id)
     users = load_users()
-
-    # Меню
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    keyboard.add("📋 Смотреть анкеты")
-
+    
     if user_id not in users:
         users[user_id] = {"step": "name"}
         save_users(users)
-        await msg.answer("👋 Привет! Давай создадим твою анкету.\nКак тебя зовут?", reply_markup=keyboard)
+        await message.answer(
+            "👋 Привет! Как тебя зовут?",
+            reply_markup=main_kb
+        )
     else:
-        await msg.answer("Ты уже зарегистрирован! Отправь /browse или нажми на кнопку ниже.", reply_markup=keyboard)
+        await message.answer(
+            "Ты уже зарегистрирован!",
+            reply_markup=main_kb
+        )
 
-# === Просмотр анкет ===
-@dp.message_handler(commands=["browse"])
-@dp.message_handler(lambda msg: msg.text == "📋 Смотреть анкеты")
-async def browse_profiles(msg: types.Message):
-    user_id = str(msg.from_user.id)
+@dp.message(F.text == "/browse")
+async def browse(message: types.Message):
     users = load_users()
-
+    user_id = str(message.from_user.id)
+    
     for uid, data in users.items():
         if uid != user_id and data.get("step") == "done":
-            keyboard = types.InlineKeyboardMarkup(row_width=2)
-            keyboard.add(
-                types.InlineKeyboardButton("❤️ Лайк", callback_data=f"like:{uid}"),
-                types.InlineKeyboardButton("⏭ Пропустить", callback_data=f"skip:{uid}")
-            )
-            await msg.answer(
-                f"🧑 Имя: {data['name']}\n📍 Город: {data['city']}\n🎯 Интересы: {data['interests']}",
-                reply_markup=keyboard
+            await message.answer(
+                f"👤 {data['name']}\n"
+                f"🏙 {data['city']}\n"
+                f"🎯 {data['interests']}",
+                reply_markup=like_skip_kb
             )
             return
-    await msg.answer("Пока нет других анкет 😢")
+    
+    await message.answer("Нет анкет для просмотра")
 
-# === Обработка кнопок ===
-@dp.callback_query_handler(lambda c: c.data.startswith("like") or c.data.startswith("skip"))
-async def handle_buttons(callback: types.CallbackQuery):
-    action, target_id = callback.data.split(":")
-    if action == "like":
-        await callback.message.answer("❤️ Лайк отправлен!")
-    else:
-        await callback.message.answer("⏭ Пропущено.")
-    await callback.answer()
-
-# === Обработка анкеты ===
-@dp.message_handler()
-async def form_handler(msg: types.Message):
-    user_id = str(msg.from_user.id)
+@dp.message(F.text == "➕ Создать анкету")
+async def create_profile(message: types.Message):
+    user_id = str(message.from_user.id)
     users = load_users()
+    users[user_id] = {"step": "name"}
+    save_users(users)
+    await message.answer("Как тебя зовут?")
 
-    # Отправка владельцу всех сообщений
-    if int(user_id) != OWNER_ID:
-        await bot.send_message(OWNER_ID, f"📥 Сообщение от @{msg.from_user.username or 'без ника'} ({user_id}):\n{msg.text}")
+@dp.callback_query(F.data == "like")
+async def like(callback: types.CallbackQuery):
+    await callback.answer("Лайк поставлен!")
+    await browse(callback.message)
 
-    if user_id in users:
-        step = users[user_id].get("step")
+@dp.callback_query(F.data == "skip")
+async def skip(callback: types.CallbackQuery):
+    await callback.answer("Пропущено")
+    await browse(callback.message)
 
-        if step == "name":
-            users[user_id]["name"] = msg.text
-            users[user_id]["step"] = "city"
-            await msg.answer("🏙 Укажи свой город:")
-        elif step == "city":
-            users[user_id]["city"] = msg.text
-            users[user_id]["step"] = "interests"
-            await msg.answer("💬 Напиши свои интересы:")
-        elif step == "interests":
-            users[user_id]["interests"] = msg.text
-            users[user_id]["step"] = "done"
-            save_users(users)
-            await msg.answer("✅ Анкета создана! Нажми '📋 Смотреть анкеты' или введи /browse")
-    else:
-        await msg.answer("Напиши /start чтобы создать анкету.")
+@dp.message()
+async def form(message: types.Message):
+    user_id = str(message.from_user.id)
+    users = load_users()
+    
+    if user_id not in users:
+        return
+    
+    step = users[user_id].get("step")
+    
+    if step == "name":
+        users[user_id]["name"] = message.text
+        users[user_id]["step"] = "city"
+        await message.answer("Из какого ты города?")
+    
+    elif step == "city":
+        users[user_id]["city"] = message.text
+        users[user_id]["step"] = "interests"
+        await message.answer("Расскажи о своих интересах")
+    
+    elif step == "interests":
+        users[user_id]["interests"] = message.text
+        users[user_id]["step"] = "done"
+        await message.answer(
+            "Анкета готова!",
+            reply_markup=main_kb
+        )
+    
+    save_users(users)
+
+async def shutdown(signal, loop):
+    """Аккуратный shutdown бота"""
+    logger.info("Получен сигнал завершения...")
+    await bot.close()
+    loop.stop()
+
+async def main():
+    # Настройка обработчиков сигналов
+    loop = asyncio.get_running_loop()
+    for s in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(
+            s,
+            lambda s=s: asyncio.create_task(shutdown(s, loop))
+        )
+    
+    try:
+        # Автоперезапуск каждые 2 часа
+        restart_task = asyncio.create_task(asyncio.sleep(7200))  # 2 часа
+        polling_task = asyncio.create_task(dp.start_polling(bot))
         
+        await asyncio.wait(
+            [restart_task, polling_task],
+            return_when=asyncio.FIRST_COMPLETED
+        )
+        
+        if restart_task.done():
+            logger.info("Время работы истекло, перезапуск...")
+            await bot.close()
+            return  # GitHub Actions перезапустит бота
+    except Exception as e:
+        logger.error(f"Ошибка: {e}")
+    finally:
+        await bot.close()
+
+if __name__ == "__main__":
+    logger.info("Бот запущен!")
+    asyncio.run(main())
